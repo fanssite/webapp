@@ -1,4 +1,4 @@
-import functools,inspect,asyncio,json,logging
+import functools,inspect,asyncio,json,logging,os,sys
 from aiohttp import web
 from urllib import parse
 from www.APIError import APIError
@@ -11,7 +11,7 @@ def get(path):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args,**kw):
-            return func
+            return func(*args,**kw)
         wrapper.__route__ = path
         wrapper.__method__ = 'GET'
         return wrapper
@@ -26,7 +26,7 @@ def post(path):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args,**kw):
-            return func
+            return func(*args,**kw)
         wrapper.__route__ = path
         wrapper.__method__ = 'POST'
         return wrapper
@@ -95,10 +95,10 @@ class RequestHandler(object):
     async def __call__(self,request):
         kw=None
         if self._has_var_kw_args or self._get_required_kw_args or self._has_named_kw_args:
-            if request['method']=='POST':
-                if not request['content_type']:
+            if request.method=='POST':
+                if not request.content_type:
                     return web.HTTPBadRequest(text='Missing content_type')
-                ct = request['content_type'].lower()
+                ct = request.content_type.lower()
                 
                 if ct.startwith('application/json'):
                     params = await request.json()
@@ -106,13 +106,13 @@ class RequestHandler(object):
                         return web.HTTPBadRequest('JSON body must be dict_obj')
                     kw = params
                     
-                elif ct.startwith('application/x-www-form-urlencode')or ct.startwith('mutilpart/form-data'):
+                elif ct.startwith('application/x-www-form-urlencode') or ct.startwith('mutilpart/form-data'):
                     params = request.post()
                     kw = dict(**params)
                 else:
-                    return web.HTTPBadRequest('Unsupported Content_type:%s'%request['content_type'])
+                    return web.HTTPBadRequest('Unsupported Content_type:%s'%request.content_type)
             
-            if request['method']=='GET':
+            if request.method=='GET':
                 qs = request.query_string()
                 if qs:
                     kw = dict()
@@ -143,3 +143,35 @@ class RequestHandler(object):
             return test
         except APIError as e:
             return dict(error=e.error,data=e.data,message=e.message)
+def add_static(app):
+    path = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])),'static')
+    app.router.add_static('/static/',path)
+    logging.info('add static %s=>%s'%('/static/',path))
+    
+def add_route(fn,app):
+    method = getattr(fn,'__method__',None)
+    path = getattr(fn, '__path__',None)
+    if path is None or method is None:
+        return ValueError('method is not found in %s or not found path attr'%str(fn))
+    #判断fn是否为协程对象并且是用户定义生成器生成的
+    if not asyncio.iscoroutinefunction(fn) and not inspect.isgeneratorfunction(fn):
+        fn = asyncio.coroutine(fn)
+    logging.info('add route %s %s=>%s(%s)'%(method,path,fn.__name__,','.join(inspect.signature(fn).parameters.keys())))
+    app.router.add_route(method,path,RequestHandler(fn,app))
+    
+def add_routes(app,modual_name):
+    n = modual_name.rfind('.')
+    if n == -1:
+        mod = __import__(modual_name,globals(),locals())
+    else:
+        name = modual_name[n+1:]
+        mod = getattr(__import__(modual_name[:n],globals(),locals(),[name],0),name)
+    for attr in dir(mod):
+        if attr.startswith('_'):
+            continue
+        fn = getattr(mod,attr)
+        if callable(fn):
+            method = getattr(fn, '__method__',None)
+            path = getattr(fn,'__route__',None)
+            if path and method:
+                add_route(app,fn)
